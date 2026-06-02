@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SAcare 月對帳</title>
+<style>
+  :root { --bg:#f4f6f8; --card:#fff; --line:#e3e8ee; --pri:#2563eb; --bad:#dc2626; --good:#16a34a; --muted:#6b7280; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif; background:var(--bg); color:#1f2937; }
+  header { background:linear-gradient(135deg,#1e3a8a,#2563eb); color:#fff; padding:20px 28px; }
+  header h1 { margin:0; font-size:20px; } header p { margin:4px 0 0; opacity:.85; font-size:13px; }
+  .wrap { max-width:1100px; margin:0 auto; padding:22px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:18px; }
+  .controls { display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:5px; }
+  input[type=text],input[type=file] { padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:14px; background:#fff; }
+  button { background:var(--pri); color:#fff; border:0; border-radius:8px; padding:10px 20px; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .hint { font-size:12px; color:var(--muted); margin-top:10px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; }
+  .stat { background:#f8fafc; border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .stat .n { font-size:24px; font-weight:700; } .stat .t { font-size:12px; color:var(--muted); }
+  .stat.bad .n { color:var(--bad); } .stat.good .n { color:var(--good); }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; border-bottom:2px solid var(--line); margin-bottom:14px; }
+  .tab { padding:9px 14px; border-radius:8px 8px 0 0; cursor:pointer; font-size:13px; border:1px solid transparent; border-bottom:none; position:relative; top:2px; }
+  .tab.active { background:#fff; border-color:var(--line); font-weight:600; }
+  .tab .badge { display:inline-block; min-width:18px; padding:0 5px; margin-left:6px; border-radius:9px; font-size:11px; background:#e5e7eb; color:#374151; text-align:center; }
+  .tab.alert .badge { background:var(--bad); color:#fff; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th,td { border:1px solid var(--line); padding:7px 9px; text-align:left; white-space:nowrap; }
+  th { background:#f1f5f9; position:sticky; top:0; }
+  tr:nth-child(even) td { background:#fafbfc; }
+  .neg { color:var(--bad); font-weight:600; } .zero { color:var(--muted); }
+  .tablebox { overflow:auto; max-height:560px; border:1px solid var(--line); border-radius:8px; }
+  .empty { padding:26px; text-align:center; color:var(--muted); }
+  #err { color:var(--bad); font-size:13px; margin-top:10px; white-space:pre-wrap; }
+  .spin { display:inline-block; width:16px; height:16px; border:2px solid #fff; border-top-color:transparent; border-radius:50%; animation:s .8s linear infinite; vertical-align:-3px; margin-right:6px; }
+  @keyframes s { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>SAcare 月對帳工具</h1>
+  <p>上傳保險公司匯出的 Excel，系統會連線 EPB 比對該月 SAcare 結帳差異（士林門市 004）</p>
+</header>
+<div class="wrap">
+  <div class="card">
+    <div class="controls">
+      <div><label>保險匯出檔 (.xls / .xlsx)</label><input type="file" id="file" accept=".xls,.xlsx"></div>
+      <div><label>比對月份 (留空=自動偵測)</label><input type="text" id="month" placeholder="YYYY-MM"></div>
+      <div><label>門市</label><input type="text" id="shop" value="004" style="width:80px"></div>
+      <button id="go">開始比對</button>
+    </div>
+    <div class="hint">比對需連線 EPB 查詢，約需 30 秒～數分鐘，請稍候。</div>
+    <div id="err"></div>
+  </div>
+
+  <div id="result" style="display:none">
+    <div class="card">
+      <div class="cards" id="stats"></div>
+    </div>
+    <div class="card">
+      <div class="tabs" id="tabs"></div>
+      <div id="panel"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let DATA = null, active = 0;
+
+$("#go").addEventListener("click", async () => {
+  const f = $("#file").files[0];
+  if (!f) { $("#err").textContent = "請先選擇保險匯出檔。"; return; }
+  $("#err").textContent = "";
+  const btn = $("#go"); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>比對中…';
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("month", $("#month").value.trim());
+  fd.append("shop", $("#shop").value.trim());
+  try {
+    const r = await fetch("/reconcile", { method:"POST", body:fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "比對失敗");
+    DATA = j; active = 0; render();
+    $("#result").style.display = "block";
+  } catch (e) {
+    $("#err").textContent = "錯誤：" + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = "開始比對";
+  }
+});
+
+function render() {
+  const s = DATA.summary, a = s.anomaly;
+  const totalAnom = DATA.tabs.filter(t=>t.anomaly).reduce((n,t)=>n+t.rows.length,0);
+  const stats = [
+    ["月份 / 門市", s.月份+" / "+s.門市, ""],
+    ["保險已繳", s.保險已繳+" (新"+s.新機+"/檢"+s.檢測新機+")", ""],
+    ["EPB SAcare 單位", s.EPB_SAcare單位, ""],
+    ["完全相符", s.相符, "good"],
+    ["異常合計", totalAnom, totalAnom? "bad":"good"],
+  ];
+  $("#stats").innerHTML = stats.map(([t,n,c])=>
+    `<div class="stat ${c}"><div class="n">${n}</div><div class="t">${t}</div></div>`).join("");
+
+  $("#tabs").innerHTML = DATA.tabs.map((t,i)=>{
+    const cls = (t.anomaly && t.rows.length)? "alert":"";
+    return `<div class="tab ${i===active?'active':''} ${cls}" onclick="sel(${i})">${t.title}<span class="badge">${t.rows.length}</span></div>`;
+  }).join("");
+  panel();
+}
+
+function sel(i){ active=i; document.querySelectorAll(".tab").forEach((e,k)=>e.classList.toggle("active",k===i)); panel(); }
+
+function panel() {
+  const t = DATA.tabs[active];
+  if (!t.rows.length) { $("#panel").innerHTML = `<div class="empty">✓ 無資料</div>`; return; }
+  const head = t.cols.map(c=>`<th>${c}</th>`).join("");
+  const body = t.rows.map(row=>"<tr>"+t.cols.map(c=>{
+    let v = row[c]; v = (v===undefined||v===null)? "":v;
+    let cls = "";
+    if (c==="差異" && v!==0 && v!=="") cls = v<0? "neg":"neg";
+    if (c==="差異" && (v===0||v==="0")) cls = "zero";
+    if (c==="相符") v = (v===true||v==="True")? "✓":"✗";
+    return `<td class="${cls}">${v}</td>`;
+  }).join("")+"</tr>").join("");
+  $("#panel").innerHTML = `<div class="tablebox"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+</script>
+</body>
+</html>
