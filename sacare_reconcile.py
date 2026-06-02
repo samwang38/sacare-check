@@ -86,6 +86,24 @@ ORDER BY p.DOC_ID, p.LINE_NO
     return pd.read_csv(io.StringIO(proc.stdout), dtype=str).fillna("")
 
 
+def query_tailpaid_keys(month: str, shop: str) -> set:
+    """當月尾款(TRANS_TYPE=H)單據上交付的裝置序號(去S)。訂金若已尾款=已完成。"""
+    y, m = int(month[:4]), int(month[5:7])
+    start, end = f"{y}-{m:02d}-01", f"{y + (m // 12)}-{(m % 12) + 1:02d}-01"
+    sql = f"""
+SELECT DISTINCT REPLACE(p.SRN_ID,' ','') SRN
+FROM POSLINEV_BI p
+WHERE p.SHOP_ID='{shop}' AND p.TRANS_TYPE='H' AND p.SRN_ID IS NOT NULL
+  AND p.DOC_DATE >= TO_DATE('{start}','YYYY-MM-DD') AND p.DOC_DATE < TO_DATE('{end}','YYYY-MM-DD')
+"""
+    proc = subprocess.run([sys.executable, EPB_QUERY, "--format", "tsv", "--limit", "20000", sql],
+                          text=True, capture_output=True, timeout=180)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr or proc.stdout)
+    lines = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+    return {strip_s(l) for l in lines[1:]} if len(lines) > 1 else set()
+
+
 def sac_category(name: str) -> str:
     n = str(name).upper()
     if "AIRPODS" in n or "週邊配件" in str(name): return "AirPods"  # 保險端AirPods登記為「週邊配件」
@@ -96,11 +114,13 @@ def sac_category(name: str) -> str:
     return "其他"
 
 
-def build_epb_units(e: pd.DataFrame):
+def build_epb_units(e: pd.DataFrame, ins_keys: set = frozenset()):
     """展開 SAcare 單位並配對主機序號(含正負號)。
     回傳 (serial_df, noser_df):
       serial_df: 每筆 SAcare→序號 的配對, sign=+1售/-1退, 後續依序號跨單據淨額。
       noser_df : 配不到主機序號的 SAcare 單位(僅正向)。
+    ins_keys: 保險已登記序號; 同單多台同品類時, 優先把 SAcare 配給已登記的那台
+              (用登記資料判斷保固對應哪台裝置)。
     """
     e = e.copy()
     e["STK_QTY"] = e["STK_QTY"].astype(float)
@@ -123,6 +143,7 @@ def build_epb_units(e: pd.DataFrame):
             ttype = "G" if (g["TRANS_TYPE"] == "G").any() else ("A" if net > 0 else "E")
             is_check = bool(g["NAME"].str.contains("檢測新機").any()) or doc in check_docs
             cand = dg[dg["mcat"] == cat]["key"].tolist()
+            cand.sort(key=lambda k: k not in ins_keys)   # 保險已登記序號優先配對
             for i in range(abs(net)):
                 rec = {"DOC_ID": doc, "日期": ddate, "SAcare品項": g["NAME"].iloc[0], "品類": cat,
                        "交易別": ttype, "檢測新機": is_check, "sign": sign}
@@ -135,7 +156,8 @@ def build_epb_units(e: pd.DataFrame):
 
 
 # ---------- 比對 ----------
-def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame, fuzzy_thr=0.7):
+def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame,
+              tail_paid_keys: set = frozenset(), fuzzy_thr=0.7):
     ins_all_keys = ins.attrs["all_keys"]
     ref_by_key = ins.attrs.get("ref_by_key", {})        # 序號 → 要保序號
     ins_new = ins[~ins["檢測新機"]].copy()
@@ -169,9 +191,13 @@ def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame
         info = pd.DataFrame(columns=["EPB序號去S", "DOC_ID", "品類", "SAcare品項", "是否訂金", "檢測新機"])
         eff_keys = set()
 
-    normal_eff = info[(~info["是否訂金"]) & (~info["檢測新機"])]
-    deposit_eff = info[info["是否訂金"]].copy()
-    check_eff = info[info["檢測新機"] & (~info["是否訂金"])]
+    # 訂金規則: 訂金不算台數; 但若該裝置當月已被尾款(H) → 視為已完成, 比照正常銷售
+    info["訂金已尾款"] = info["是否訂金"] & info["EPB序號去S"].isin(tail_paid_keys)
+    info["有效訂金"] = info["是否訂金"] & (~info["訂金已尾款"])   # 仍是純訂金(未尾款)
+
+    normal_eff = info[(~info["有效訂金"]) & (~info["檢測新機"])]   # 含: 一般A + 訂金已尾款
+    deposit_eff = info[info["有效訂金"]].copy()                    # 純訂金(未尾款) → 差異5
+    check_eff = info[info["檢測新機"] & (~info["有效訂金"])]
     ek_normal = set(normal_eff["EPB序號去S"])
     dep_reg_keys = set(deposit_eff["EPB序號去S"]) & ins_all_keys
 
@@ -255,8 +281,9 @@ def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame
 def run(insurance_path: str, month: str, shop: str = "004") -> dict:
     """供 server / 程式呼叫: 回傳 (ins, reconcile結果dict)。"""
     ins = load_insurance(insurance_path, month)
-    serial_df, noser_df = build_epb_units(query_epb(month, shop))
-    return ins, reconcile(ins, serial_df, noser_df)
+    serial_df, noser_df = build_epb_units(query_epb(month, shop), ins.attrs["all_keys"])
+    tail_paid = query_tailpaid_keys(month, shop)
+    return ins, reconcile(ins, serial_df, noser_df, tail_paid)
 
 
 def detect_month(insurance_path: str) -> str:
@@ -275,8 +302,9 @@ def main() -> int:
     out = args.out or f"SAcare對帳_{args.month}_{args.shop}.xlsx"
 
     ins = load_insurance(args.insurance, args.month)
-    serial_df, noser_df = build_epb_units(query_epb(args.month, args.shop))
-    R = reconcile(ins, serial_df, noser_df)
+    serial_df, noser_df = build_epb_units(query_epb(args.month, args.shop), ins.attrs["all_keys"])
+    tail_paid = query_tailpaid_keys(args.month, args.shop)
+    R = reconcile(ins, serial_df, noser_df, tail_paid)
 
     summary = pd.DataFrame({"項目": [
         "比對月份", "門市", "保險已繳筆數", "其中-新機", "其中-檢測新機",
