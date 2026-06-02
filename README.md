@@ -41,6 +41,10 @@ python3 sacare_reconcile.py --insurance 保險匯出.xls --month 2026-06
 
 ## 依賴
 
+```bash
+pip3 install -r requirements.txt
+```
+
 - Python 3：`pandas`、`openpyxl`、`flask`、`lxml`
 - EPB 查詢沿用既有 helper（`epbrowser-sales-reporting` skill 的 `epb_query.py`，走 EPBrowser WebService + Java 8）。
 
