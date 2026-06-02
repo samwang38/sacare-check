@@ -19,7 +19,7 @@ from difflib import SequenceMatcher
 import pandas as pd
 
 EPB_QUERY = "/Users/sa/.codex/skills/epbrowser-sales-reporting/scripts/epb_query.py"
-C_POLICY, C_DATE, C_CAT, C_MODEL_SN, C_COND, C_PAY = 4, 5, 6, 8, 9, 14
+C_APPLY, C_POLICY, C_DATE, C_CAT, C_MODEL_SN, C_COND, C_PAY = 0, 4, 5, 6, 8, 9, 14
 ACTIVITY_CODE = "99901780"   # SA Care 檢測新機活動代碼
 
 # 主機品類 CAT4 (排除 Apple Pencil 4010、鍵盤等配件)
@@ -41,7 +41,8 @@ def load_insurance(path: str, month: str) -> pd.DataFrame:
     raw = pd.read_html(path)[0].iloc[1:].reset_index(drop=True)
     toks = raw[C_MODEL_SN].map(lambda s: str(s).split())
     df = pd.DataFrame({
-        "保單號": raw[C_POLICY], "保險起日": raw[C_DATE].map(roc_to_iso), "產品種類": raw[C_CAT],
+        "要保序號": raw[C_APPLY], "保單號": raw[C_POLICY],
+        "保險起日": raw[C_DATE].map(roc_to_iso), "產品種類": raw[C_CAT],
         "序號": toks.map(lambda t: t[1] if len(t) > 1 else ""),          # 主機序號
         "配件序號": toks.map(lambda t: " ".join(t[2:]) if len(t) > 2 else ""),
         "機況": raw[C_COND].astype(str).str.replace(r"\s+", "", regex=True),
@@ -50,11 +51,15 @@ def load_insurance(path: str, month: str) -> pd.DataFrame:
     df = df[(df["繳費碼"] == "Y") & (df["保險起日"].str[:7] == month)].copy()
     df["key"] = df["序號"].str.upper().str.strip()
     df["檢測新機"] = df["機況"].str.contains("檢測新機")
-    # 全序號集合(含配件), 供 EPB→保險 反查避免誤判
-    all_keys = set()
+    # 全序號集合(含配件) + 序號→要保序號 對照, 供 EPB→保險 反查
+    all_keys, ref_by_key = set(), {}
     for _, r in df.iterrows():
-        all_keys.update(t.upper() for t in (r["序號"] + " " + r["配件序號"]).split())
+        for t in (r["序號"] + " " + r["配件序號"]).split():
+            k = t.upper()
+            all_keys.add(k)
+            ref_by_key.setdefault(k, r["要保序號"])
     df.attrs["all_keys"] = all_keys
+    df.attrs["ref_by_key"] = ref_by_key
     return df.reset_index(drop=True)
 
 
@@ -132,8 +137,23 @@ def build_epb_units(e: pd.DataFrame):
 # ---------- 比對 ----------
 def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame, fuzzy_thr=0.7):
     ins_all_keys = ins.attrs["all_keys"]
+    ref_by_key = ins.attrs.get("ref_by_key", {})        # 序號 → 要保序號
     ins_new = ins[~ins["檢測新機"]].copy()
     ins_check = ins[ins["檢測新機"]].copy()
+
+    # EPB 端對照: 序號→出現過的單據; 單據→主機序號(供配不到序號的SAcare回查同單裝置)
+    docs_by_key, keys_by_doc = {}, {}
+    if len(serial_df):
+        for k, g in serial_df.groupby("EPB序號去S"):
+            docs_by_key[k] = ",".join(sorted(g["DOC_ID"].unique()))
+        for d, g in serial_df.groupby("DOC_ID"):
+            keys_by_doc[d] = list(g["EPB序號去S"].unique())
+
+    def ref_of_doc(doc):   # 由單據的主機序號回查保險要保序號
+        for k in keys_by_doc.get(doc, []):
+            if k in ref_by_key:
+                return ref_by_key[k]
+        return ""
 
     # 依主機序號跨單據淨額 (賣+1/退-1)
     if len(serial_df):
@@ -158,7 +178,9 @@ def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame
     matched = ins_new[ins_new["key"].isin(ek_normal)].copy()
     # 差異2 = 保險(新機)有, 但 EPB 無有效 SAcare (含: 從未結 / 已退淨額0)
     only_ins = ins_new[(~ins_new["key"].isin(ek_normal)) & (~ins_new["key"].isin(dep_reg_keys))].copy()
+    only_ins["EPB單據(參考)"] = only_ins["key"].map(lambda k: docs_by_key.get(k, ""))
     only_epb = normal_eff[~normal_eff["EPB序號去S"].isin(ins_all_keys)].copy()
+    only_epb["要保序號"] = only_epb["EPB序號去S"].map(lambda k: ref_by_key.get(k, ""))
 
     # 模糊配對(同機序號登打差異)
     typo_rows, oi_idx, oe_idx = [], set(), set()
@@ -172,19 +194,22 @@ def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame
                 br, bj = r, j
         if bj is not None and br >= fuzzy_thr:
             b = only_epb.loc[bj]
-            typo_rows.append({"保單號": a["保單號"], "保險起日": a["保險起日"], "產品種類": a["產品種類"],
-                              "保險序號": a["序號"], "EPB序號去S": b["EPB序號去S"],
+            typo_rows.append({"要保序號": a["要保序號"], "保單號": a["保單號"], "保險起日": a["保險起日"],
+                              "產品種類": a["產品種類"], "保險序號": a["序號"], "EPB序號去S": b["EPB序號去S"],
                               "EPB單據": b["DOC_ID"], "相似度": round(br, 2)})
             oi_idx.add(i); oe_idx.add(bj)
     typo = pd.DataFrame(typo_rows)
     only_ins, only_epb = only_ins.drop(index=oi_idx), only_epb.drop(index=oe_idx)
 
-    # 訂金: 標記保險是否已登記
+    # 訂金: 標記保險是否已登記 + 帶出要保序號
     deposit_eff["保險已登記"] = deposit_eff["EPB序號去S"].apply(lambda k: "是" if k in ins_all_keys else "否")
+    deposit_eff["要保序號"] = deposit_eff["EPB序號去S"].map(lambda k: ref_by_key.get(k, ""))
 
-    # EPB 多打/無主機序號 (正向且非檢測非訂金)
+    # EPB 多打/無主機序號 (正向且非檢測非訂金); 由同單主機序號回查要保序號
     excess = noser_df[(~noser_df.get("檢測新機", False)) & (noser_df.get("交易別", "") != "G")].copy() \
         if len(noser_df) else pd.DataFrame(columns=["DOC_ID", "品類", "SAcare品項"])
+    if len(excess):
+        excess["要保序號"] = excess["DOC_ID"].map(ref_of_doc)
 
     # 檢測新機(正常) 數量核對 (品類對齊)
     ic = ins_check["產品種類"].map(sac_category).value_counts().rename("保險筆數")
@@ -271,10 +296,10 @@ def main() -> int:
         R["daily_tbl"].to_excel(w, sheet_name="逐日總量比較", index=False)
         R["matched"][["保單號", "保險起日", "產品種類", "序號"]].to_excel(w, sheet_name="相符", index=False)
         _safe(R["typo"]).to_excel(w, sheet_name="差異1_序號登記差異", index=False)
-        R["only_ins"][["保單號", "保險起日", "產品種類", "序號"]].to_excel(w, sheet_name="差異2_保險有EPB無", index=False)
-        R["only_epb"][["DOC_ID", "品類", "SAcare品項", "EPB序號去S"]].to_excel(w, sheet_name="差異3_EPB有保險無", index=False)
-        _safe(R["excess"][["DOC_ID", "品類", "SAcare品項"]] if len(R["excess"]) else R["excess"]).to_excel(w, sheet_name="差異4_EPB多打無序號", index=False)
-        _safe(R["deposit"][["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "保險已登記"]] if len(R["deposit"]) else R["deposit"]).to_excel(w, sheet_name="差異5_訂金", index=False)
+        R["only_ins"][["要保序號", "保單號", "保險起日", "產品種類", "序號", "EPB單據(參考)"]].to_excel(w, sheet_name="差異2_保險有EPB無", index=False)
+        R["only_epb"][["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "要保序號"]].to_excel(w, sheet_name="差異3_EPB有保險無", index=False)
+        _safe(R["excess"][["DOC_ID", "品類", "SAcare品項", "要保序號"]] if len(R["excess"]) else R["excess"]).to_excel(w, sheet_name="差異4_EPB多打無序號", index=False)
+        _safe(R["deposit"][["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "保險已登記", "要保序號"]] if len(R["deposit"]) else R["deposit"]).to_excel(w, sheet_name="差異5_訂金", index=False)
         R["check_tbl"].to_excel(w, sheet_name="檢測新機_數量核對", index=False)
         R["ins_check"][["保單號", "保險起日", "產品種類", "序號"]].to_excel(w, sheet_name="檢測新機_保險明細", index=False)
         _safe(R["epb_check_detail"]).to_excel(w, sheet_name="檢測新機_EPB明細", index=False)
