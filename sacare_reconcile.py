@@ -14,11 +14,23 @@
   - 訂金(TRANS_TYPE=G): 該月不算實際銷售, 若保險已登記則列為異常。
 """
 from __future__ import annotations
-import argparse, re, subprocess, sys, io
+import argparse, os, re, subprocess, sys, io
 from difflib import SequenceMatcher
+from pathlib import Path
 import pandas as pd
 
-EPB_QUERY = "/Users/sa/.codex/skills/epbrowser-sales-reporting/scripts/epb_query.py"
+# EPB 查詢腳本路徑: 可用環境變數 EPB_QUERY 覆寫(供不同機器使用)。
+# 預設依序找: 環境變數 → 同層 epb_query.py → 既有 codex skill 路徑。
+def _resolve_epb_query() -> str:
+    env = os.environ.get("EPB_QUERY")
+    if env:
+        return os.path.expanduser(env)
+    local = Path(__file__).resolve().parent / "epb_query.py"
+    if local.exists():
+        return str(local)
+    return os.path.expanduser("~/.codex/skills/epbrowser-sales-reporting/scripts/epb_query.py")
+
+EPB_QUERY = _resolve_epb_query()
 C_APPLY, C_POLICY, C_DATE, C_CAT, C_MODEL_SN, C_COND, C_PAY = 0, 4, 5, 6, 8, 9, 14
 ACTIVITY_CODE = "99901780"   # SA Care 檢測新機活動代碼
 
@@ -64,7 +76,17 @@ def load_insurance(path: str, month: str) -> pd.DataFrame:
 
 
 # ---------- EPB 端 ----------
+def _ensure_epb_query():
+    if not os.path.exists(EPB_QUERY):
+        raise FileNotFoundError(
+            f"找不到 EPB 查詢腳本: {EPB_QUERY}\n"
+            "請設定環境變數 EPB_QUERY 指向 epb_query.py，例如:\n"
+            "  export EPB_QUERY=/路徑/epb_query.py\n"
+            "或把 epb_query.py 放到與本程式同一個資料夾。")
+
+
 def query_epb(month: str, shop: str) -> pd.DataFrame:
+    _ensure_epb_query()
     y, m = int(month[:4]), int(month[5:7])
     start, end = f"{y}-{m:02d}-01", f"{y + (m // 12)}-{(m % 12) + 1:02d}-01"
     sql = f"""
@@ -88,6 +110,7 @@ ORDER BY p.DOC_ID, p.LINE_NO
 
 def query_tailpaid_keys(month: str, shop: str) -> set:
     """當月尾款(TRANS_TYPE=H)單據上交付的裝置序號(去S)。訂金若已尾款=已完成。"""
+    _ensure_epb_query()
     y, m = int(month[:4]), int(month[5:7])
     start, end = f"{y}-{m:02d}-01", f"{y + (m // 12)}-{(m % 12) + 1:02d}-01"
     sql = f"""

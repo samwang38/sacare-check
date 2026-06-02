@@ -46,8 +46,33 @@ pip3 install -r requirements.txt
 ```
 
 - Python 3：`pandas`、`openpyxl`、`flask`、`lxml`
-- EPB 查詢沿用既有 helper（`epbrowser-sales-reporting` skill 的 `epb_query.py`，走 EPBrowser WebService + Java 8）。
+- EPB 查詢需要既有 helper `epb_query.py`（走 EPBrowser WebService + Java 8）。
+
+## 在新機器上設定 EPB 連線
+
+本程式透過 `epb_query.py` 連 EPB，路徑**可用環境變數覆寫**，依序解析：
+
+1. 環境變數 `EPB_QUERY`
+2. 與本程式同資料夾的 `epb_query.py`
+3. 預設 `~/.codex/skills/epbrowser-sales-reporting/scripts/epb_query.py`
+
+```bash
+# 指定 epb_query.py 位置
+export EPB_QUERY=/你的路徑/epb_query.py
+```
+
+`epb_query.py` 底層的 Java helper 路徑也可用環境變數覆寫（預設值對應原作者機器）：
+
+```bash
+export EPB_LIVE_REPORT_ROOT=/你的路徑/live-report-app   # 內含 EPBReportQuery.java
+export EPB_JAVA=/你的Java8/bin/java
+export EPB_JAVAC=/你的Java8/bin/javac
+export EPB_JAVA_CP="$EPB_LIVE_REPORT_ROOT:/Library/EPBrowser/EPB/Shell/lib/*:/Library/EPBrowser/EPB/Shell/shell.jar"
+```
+
+> **網路需求**：EPB WebService 在門市內網（例：`192.168.1.177:8080`）。必須連到門市網路（或 VPN）才能查詢，否則會 connect timed out。
 
 ## 注意
 
 - 產出的對帳 Excel 與保險匯出檔含客戶資料，已由 `.gitignore` 排除，請勿提交。
+- 本工具需門市 EPB 環境（Java 8 + EPBrowser lib + 內網）才能實際查詢；僅 `pip install` 無法連線。
