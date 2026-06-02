@@ -5,5 +5,7 @@
 # Python
 __pycache__/
 *.pyc
+# Java 編譯產物
+*.class
 # 系統
 .DS_Store

@@ -50,27 +50,26 @@ pip3 install -r requirements.txt
 
 ## 在新機器上設定 EPB 連線
 
-本程式透過 `epb_query.py` 連 EPB，路徑**可用環境變數覆寫**，依序解析：
+查詢層的 `epb_query.py` 與 `EPBReportQuery.java` **已隨 repo 附帶**，`epb_query.py` 會被自動找到（與本程式同資料夾）。
 
-1. 環境變數 `EPB_QUERY`
-2. 與本程式同資料夾的 `epb_query.py`
-3. 預設 `~/.codex/skills/epbrowser-sales-reporting/scripts/epb_query.py`
+仍需本機具備（不在 repo 內）：
+- **Java 8**（JDK，需 `javac` 編譯）
+- **EPBrowser** 的 `shell.jar` 等 lib（提供 `com.epb.ap.*` 類別）
+- 連得到 EPB WebService 的**門市內網**
 
-```bash
-# 指定 epb_query.py 位置
-export EPB_QUERY=/你的路徑/epb_query.py
-```
-
-`epb_query.py` 底層的 Java helper 路徑也可用環境變數覆寫（預設值對應原作者機器）：
+用環境變數指向本機環境（預設值對應原作者機器，請改成自己的）：
 
 ```bash
-export EPB_LIVE_REPORT_ROOT=/你的路徑/live-report-app   # 內含 EPBReportQuery.java
+# EPBReportQuery.java 所在資料夾 = 本 repo 目錄
+export EPB_LIVE_REPORT_ROOT=/你clone的路徑/sacare-check
 export EPB_JAVA=/你的Java8/bin/java
 export EPB_JAVAC=/你的Java8/bin/javac
 export EPB_JAVA_CP="$EPB_LIVE_REPORT_ROOT:/Library/EPBrowser/EPB/Shell/lib/*:/Library/EPBrowser/EPB/Shell/shell.jar"
+# (選用) 若 epb_query.py 不在同資料夾, 可另外指定:
+# export EPB_QUERY=/你的路徑/epb_query.py
 ```
 
-> **網路需求**：EPB WebService 在門市內網（例：`192.168.1.177:8080`）。必須連到門市網路（或 VPN）才能查詢，否則會 connect timed out。
+> **網路需求**：EPB WebService 在門市內網（`http://192.168.1.177:8080`）。必須連到門市網路（或 VPN）才能查詢，否則會 connect timed out。WSDL 位址寫在 `EPBReportQuery.java`，如門市 IP 不同需自行修改。
 
 ## 注意
 
