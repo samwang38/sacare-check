@@ -48,10 +48,10 @@ python3 sacare_reconcile.py --insurance 保險匯出.xls --month 2026-06
 2. 進資料夾，**雙擊 `setup.command`**（或終端機 `./setup.command`）。它會自動：
    - 安裝 Python 套件
    - 偵測 Java 8 與 EPBrowser
-   - 詢問一次 **EPB WebService 位址**（向主管索取）並寫入本機 `.env`
+   - **自動從 EPBrowser 設定檔（`/Library/EPBrowser/EPB/Setting.xml` 的 `<EPB_URL>`）讀取本機 EPB 位址**，寫入本機 `.env`（讀不到才會請你手動輸入）
 3. 完成後，**雙擊 `啟動SAcare對帳.command`**（開 http://127.0.0.1:5066 ）即可使用。
 
-> 設定只需做一次；`.env` 存在本機、不會上傳 GitHub。
+> 通常**全程免輸入**（位址自動偵測）；設定只需做一次，`.env` 存在本機、不會上傳 GitHub。
 
 ### 前置需求（同事電腦需具備）
 - **Java 8**（JDK）

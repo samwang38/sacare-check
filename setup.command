@@ -32,8 +32,19 @@ echo "[3/3] 連線設定…"
 if [ -f .env ] && grep -q "EPB_WSDL_URL=." .env; then
   echo "✓ 已有 .env 設定，略過。(要重設請先刪除 .env)"
 else
-  echo "請輸入 EPB WebService 位址 (向主管索取，格式如 http://192.168.x.x:8080/EPB_AP_EPB/EPB_AP?wsdl)："
-  read -r WSDL
+  # 自動從 EPBrowser 設定檔讀取本機 EPB 主機位址
+  SETTING="/Library/EPBrowser/EPB/Setting.xml"
+  WSDL=""
+  if [ -f "$SETTING" ]; then
+    WSDL=$(grep -oE '<EPB_URL>[^<]+</EPB_URL>' "$SETTING" | sed -E 's#</?EPB_URL>##g' | head -1)
+  fi
+  if [ -n "$WSDL" ]; then
+    echo "✓ 已自動偵測 EPB 位址：$WSDL"
+  else
+    echo "⚠ 無法自動偵測 EPB 位址 (找不到 $SETTING)。"
+    echo "請手動輸入 EPB WebService 位址 (向主管索取，格式如 http://192.168.x.x:8080/EPB_AP_EPB/EPB_AP?wsdl)："
+    read -r WSDL
+  fi
   ROOT="$(pwd)"
   cat > .env <<EOF
 # SAcare 對帳工具 本機設定 (此檔不會上傳 GitHub)
