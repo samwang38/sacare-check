@@ -7,5 +7,7 @@ __pycache__/
 *.pyc
 # Java 編譯產物
 *.class
+# 本機設定 (含內網位址，勿上傳)
+.env
 # 系統
 .DS_Store

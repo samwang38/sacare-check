@@ -39,39 +39,40 @@ python3 server.py          # 或雙擊「啟動SAcare對帳.command」
 python3 sacare_reconcile.py --insurance 保險匯出.xls --month 2026-06
 ```
 
-## 依賴
+## 安裝（同事端，一鍵）
+
+1. 下載專案：
+   ```bash
+   git clone https://github.com/samwang38/sacare-check.git
+   ```
+2. 進資料夾，**雙擊 `setup.command`**（或終端機 `./setup.command`）。它會自動：
+   - 安裝 Python 套件
+   - 偵測 Java 8 與 EPBrowser
+   - 詢問一次 **EPB WebService 位址**（向主管索取）並寫入本機 `.env`
+3. 完成後，**雙擊 `啟動SAcare對帳.command`**（開 http://127.0.0.1:5066 ）即可使用。
+
+> 設定只需做一次；`.env` 存在本機、不會上傳 GitHub。
+
+### 前置需求（同事電腦需具備）
+- **Java 8**（JDK）
+- **EPBrowser**（提供 `com.epb.ap.*` 的 `shell.jar`）
+- 連得到 EPB 的**門市內網**
+
+### 設定值（環境變數 / `.env`，範本見 `.env.example`）
+`EPB_WSDL_URL`(WebService位址，向主管索取)、`EPB_LIVE_REPORT_ROOT`(本專案資料夾)、`EPB_JAVA`、`EPB_JAVAC`、`EPB_JAVA_CP`。
+`epb_query.py` 與 `EPBReportQuery.java` 已隨 repo 附帶，會被自動找到。
+
+> **網路需求**：必須連到門市網路（或 VPN）才能查詢，否則會 connect timed out。
+
+## 使用方式（手動）
 
 ```bash
-pip3 install -r requirements.txt
+pip3 install -r requirements.txt        # 安裝套件(setup.command 會自動做)
+python3 server.py                       # HTML 介面, 或雙擊 啟動SAcare對帳.command
+python3 sacare_reconcile.py --insurance 保險匯出.xls --month 2026-06 --shop 004   # CLI 產 Excel
 ```
-
-- Python 3：`pandas`、`openpyxl`、`flask`、`lxml`
-- EPB 查詢需要既有 helper `epb_query.py`（走 EPBrowser WebService + Java 8）。
-
-## 在新機器上設定 EPB 連線
-
-查詢層的 `epb_query.py` 與 `EPBReportQuery.java` **已隨 repo 附帶**，`epb_query.py` 會被自動找到（與本程式同資料夾）。
-
-仍需本機具備（不在 repo 內）：
-- **Java 8**（JDK，需 `javac` 編譯）
-- **EPBrowser** 的 `shell.jar` 等 lib（提供 `com.epb.ap.*` 類別）
-- 連得到 EPB WebService 的**門市內網**
-
-用環境變數指向本機環境（預設值對應原作者機器，請改成自己的）：
-
-```bash
-# EPBReportQuery.java 所在資料夾 = 本 repo 目錄
-export EPB_LIVE_REPORT_ROOT=/你clone的路徑/sacare-check
-export EPB_JAVA=/你的Java8/bin/java
-export EPB_JAVAC=/你的Java8/bin/javac
-export EPB_JAVA_CP="$EPB_LIVE_REPORT_ROOT:/Library/EPBrowser/EPB/Shell/lib/*:/Library/EPBrowser/EPB/Shell/shell.jar"
-# (選用) 若 epb_query.py 不在同資料夾, 可另外指定:
-# export EPB_QUERY=/你的路徑/epb_query.py
-```
-
-> **網路需求**：EPB WebService 在門市內網（`http://192.168.1.177:8080`）。必須連到門市網路（或 VPN）才能查詢，否則會 connect timed out。WSDL 位址寫在 `EPBReportQuery.java`，如門市 IP 不同需自行修改。
 
 ## 注意
 
-- 產出的對帳 Excel 與保險匯出檔含客戶資料，已由 `.gitignore` 排除，請勿提交。
+- 產出的對帳 Excel、保險匯出檔、`.env`(含內網位址) 皆由 `.gitignore` 排除，請勿提交。
 - 本工具需門市 EPB 環境（Java 8 + EPBrowser lib + 內網）才能實際查詢；僅 `pip install` 無法連線。

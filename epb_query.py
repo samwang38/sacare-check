@@ -11,7 +11,23 @@ import sys
 from pathlib import Path
 from typing import List, Dict
 
-DEFAULT_ROOT = Path(os.environ.get("EPB_LIVE_REPORT_ROOT", "/Users/sa/Claude/週報製作/報表製作_士林/live-report-app"))
+
+def _load_env_file() -> None:
+    """讀取同資料夾的 .env (KEY=VALUE), 補進 os.environ (不覆寫既有值)。"""
+    f = Path(__file__).resolve().parent / ".env"
+    if not f.exists():
+        return
+    for line in f.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip())
+
+
+_load_env_file()
+
+DEFAULT_ROOT = Path(os.environ.get("EPB_LIVE_REPORT_ROOT", str(Path(__file__).resolve().parent)))
 DEFAULT_JAVA = os.environ.get("EPB_JAVA", "/Library/Java/JavaVirtualMachines/jdk1.8.0_251.jdk/Contents/Home/jre/bin/java")
 DEFAULT_JAVAC = os.environ.get("EPB_JAVAC", "/Library/Java/JavaVirtualMachines/jdk1.8.0_251.jdk/Contents/Home/bin/javac")
 DEFAULT_CP = os.environ.get("EPB_JAVA_CP", f"{DEFAULT_ROOT}:/Library/EPBrowser/EPB/Shell/lib/*:/Library/EPBrowser/EPB/Shell/shell.jar")
@@ -31,11 +47,15 @@ def compile_helper(root: Path, javac: str, java_cp: str) -> None:
 
 def run_sql(sql: str, limit: int, timeout: int, root: Path, java: str, javac: str, java_cp: str) -> str:
     compile_helper(root, javac, java_cp)
+    wsdl = os.environ.get("EPB_WSDL_URL", "")
+    if not wsdl:
+        raise RuntimeError("未設定 EPB_WSDL_URL (EPB WebService 位址)。請執行 setup.command 或設定環境變數。")
     proc = subprocess.run(
         [
             java,
             "-Dsun.net.client.defaultConnectTimeout=15000",
             "-Dsun.net.client.defaultReadTimeout=180000",
+            f"-Depb.wsdl={wsdl}",
             "-cp",
             java_cp,
             "EPBReportQuery",

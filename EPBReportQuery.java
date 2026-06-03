@@ -18,8 +18,16 @@ public class EPBReportQuery {
         String sql = args[0];
         int maxRows = args.length > 1 ? Integer.parseInt(args[1]) : 100000;
 
+        // EPB WebService WSDL 位址由外部提供(系統屬性 -Depb.wsdl 或環境變數 EPB_WSDL_URL),
+        // 不寫死在原始碼, 以免內網位址外洩。
+        String wsdl = System.getProperty("epb.wsdl");
+        if (wsdl == null || wsdl.isEmpty()) wsdl = System.getenv("EPB_WSDL_URL");
+        if (wsdl == null || wsdl.isEmpty()) {
+            throw new IllegalArgumentException(
+                "未設定 EPB WSDL 位址。請設定環境變數 EPB_WSDL_URL，或執行 setup.command 完成設定。");
+        }
         EPBAPService service = new EPBAPService(
-                new URL("http://192.168.1.177:8080/EPB_AP_EPB/EPB_AP?wsdl"),
+                new URL(wsdl),
                 new QName("http://ap.epb.com/", "EPB_APService"));
         EPBAP port = service.getEPBAPPort();
 
