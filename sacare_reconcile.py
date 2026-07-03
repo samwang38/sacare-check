@@ -91,7 +91,7 @@ def query_epb(month: str, shop: str) -> pd.DataFrame:
     start, end = f"{y}-{m:02d}-01", f"{y + (m // 12)}-{(m % 12) + 1:02d}-01"
     sql = f"""
 SELECT p.DOC_ID, TO_CHAR(p.DOC_DATE,'YYYY-MM-DD') DOC_DATE, p.LINE_NO, p.TRANS_TYPE,
-       p.STK_ID, p.NAME, p.SRN_ID, p.STK_QTY, p.CAT4_ID
+       p.EMP_ID1, p.STK_ID, p.NAME, p.SRN_ID, p.STK_QTY, p.CAT4_ID
 FROM POSLINEV_BI p
 WHERE p.SHOP_ID='{shop}'
   AND p.DOC_DATE >= TO_DATE('{start}','YYYY-MM-DD') AND p.DOC_DATE < TO_DATE('{end}','YYYY-MM-DD')
@@ -137,6 +137,51 @@ def sac_category(name: str) -> str:
     return "其他"
 
 
+def _same_month_deposit_tail_pairs(e: pd.DataFrame) -> dict:
+    """以同月、同員工、相同品項數量識別 G 訂金與 H 尾款，回傳 G單→H單。"""
+    if "EMP_ID1" not in e.columns:
+        e = e.assign(EMP_ID1="")
+
+    def signature(group):
+        return tuple(sorted(
+            (str(row.STK_ID), round(float(row.STK_QTY), 4))
+            for row in group.itertuples()
+        ))
+
+    meta = {}
+    for doc, group in e.groupby("DOC_ID"):
+        trans = set(group["TRANS_TYPE"])
+        kind = "G" if "G" in trans else ("H" if "H" in trans else "")
+        if not kind:
+            continue
+        meta[doc] = {
+            "kind": kind,
+            "date": str(group["DOC_DATE"].iloc[0]),
+            "employee": str(group["EMP_ID1"].iloc[0]),
+            "signature": signature(group),
+        }
+
+    pairs, used_g = {}, set()
+    for h_doc, h in sorted(meta.items(), key=lambda item: item[1]["date"]):
+        if h["kind"] != "H":
+            continue
+        candidates = [
+            (g["date"], g_doc)
+            for g_doc, g in meta.items()
+            if g["kind"] == "G"
+            and g_doc not in used_g
+            and g["date"][:7] == h["date"][:7]
+            and g["date"] <= h["date"]
+            and g["employee"] == h["employee"]
+            and g["signature"] == h["signature"]
+        ]
+        if candidates:
+            _, g_doc = max(candidates)
+            pairs[g_doc] = h_doc
+            used_g.add(g_doc)
+    return pairs
+
+
 def build_epb_units(e: pd.DataFrame, ins_keys: set = frozenset()):
     """展開 SAcare 單位並配對主機序號(含正負號)。
     回傳 (serial_df, noser_df):
@@ -153,10 +198,17 @@ def build_epb_units(e: pd.DataFrame, ins_keys: set = frozenset()):
     dev = e[(e["SRN_ID"] != "") & (e["CAT4_ID"].isin(MAIN_CAT4))].copy()   # 只留主機序號
     dev["mcat"] = dev["CAT4_ID"].map(MAIN_CAT4)
     dev["key"] = dev["SRN_ID"].map(strip_s)
+    deposit_tail_pairs = _same_month_deposit_tail_pairs(e)
+    paired_tail_docs = set(deposit_tail_pairs.values())
 
     serial_rows, noser_rows = [], []
     for doc in sac["DOC_ID"].unique():
+        if doc in paired_tail_docs:
+            continue
         sg, dg = sac[sac["DOC_ID"] == doc], dev[dev["DOC_ID"] == doc]
+        linked_tail_doc = deposit_tail_pairs.get(doc, "")
+        if linked_tail_doc:
+            dg = pd.concat([dg, dev[dev["DOC_ID"] == linked_tail_doc]], ignore_index=True)
         ddate = sg["DOC_DATE"].iloc[0]
         for cat, g in sg.groupby("cat"):
             net = int(round(g["STK_QTY"].sum()))
@@ -171,7 +223,8 @@ def build_epb_units(e: pd.DataFrame, ins_keys: set = frozenset()):
             cand.sort(key=lambda k: k not in ins_keys)   # 保險已登記序號優先配對
             for i in range(abs(net)):
                 rec = {"DOC_ID": doc, "日期": ddate, "SAcare品項": g["NAME"].iloc[0], "品類": cat,
-                       "交易別": ttype, "檢測新機": is_check, "sign": sign}
+                       "交易別": ttype, "關聯尾款單據": linked_tail_doc,
+                       "檢測新機": is_check, "sign": sign}
                 key = cand[i] if i < len(cand) else ""
                 if key:
                     serial_rows.append({**rec, "EPB序號去S": key})
@@ -210,12 +263,13 @@ def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame
         info = pos.sort_values("檢測新機").groupby("EPB序號去S").agg(
             DOC_ID=("DOC_ID", "last"), 日期=("日期", "last"),
             品類=("品類", "last"), SAcare品項=("SAcare品項", "last"),
+            關聯尾款單據=("關聯尾款單據", "last"),
             是否訂金=("交易別", lambda s: (s == "G").any()),
             是否尾款=("交易別", lambda s: (s == "H").any()),
             檢測新機=("檢測新機", "any")).reset_index()
         info = info[info["EPB序號去S"].isin(eff_keys)].copy()
     else:
-        info = pd.DataFrame(columns=["EPB序號去S", "DOC_ID", "日期", "品類", "SAcare品項",
+        info = pd.DataFrame(columns=["EPB序號去S", "DOC_ID", "日期", "品類", "SAcare品項", "關聯尾款單據",
                                      "是否訂金", "是否尾款", "檢測新機"])
         eff_keys = set()
 
@@ -355,7 +409,7 @@ def main() -> int:
         R["matched"][["保單號", "保險起日", "產品種類", "序號"]].to_excel(w, sheet_name="相符", index=False)
         _safe(R["typo"]).to_excel(w, sheet_name="差異1_序號登記差異", index=False)
         R["only_ins"][["要保序號", "保單號", "保險起日", "產品種類", "序號", "EPB單據(參考)"]].to_excel(w, sheet_name="差異2_保險有EPB無", index=False)
-        R["only_epb"][["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "要保序號"]].to_excel(w, sheet_name="差異3_EPB有保險無", index=False)
+        R["only_epb"][["DOC_ID", "關聯尾款單據", "品類", "SAcare品項", "EPB序號去S", "要保序號"]].to_excel(w, sheet_name="差異3_EPB有保險無", index=False)
         _safe(R["excess"][["DOC_ID", "品類", "SAcare品項", "要保序號"]] if len(R["excess"]) else R["excess"]).to_excel(w, sheet_name="差異4_EPB多打無序號", index=False)
         _safe(R["deposit"][["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "保險已登記", "要保序號"]] if len(R["deposit"]) else R["deposit"]).to_excel(w, sheet_name="訂金_已納入比對", index=False)
         R["check_tbl"].to_excel(w, sheet_name="檢測新機_數量核對", index=False)
