@@ -21,9 +21,9 @@ TABS = [
     ("daily_tbl", "逐日總量比較", ["日期", "保險筆數", "EPB淨額", "差異"], False),
     ("typo",      "差異1·序號登記差異", ["要保序號", "保單號", "保險起日", "產品種類", "保險序號", "EPB序號去S", "EPB單據", "相似度"], True),
     ("only_ins",  "差異2·保險有/EPB無", ["要保序號", "保單號", "保險起日", "產品種類", "序號", "EPB單據(參考)"], True),
-    ("only_epb",  "差異3·EPB有/保險無", ["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "要保序號"], True),
+    ("only_epb",  "差異3·EPB有/保險無", ["DOC_ID", "關聯尾款單據", "品類", "SAcare品項", "EPB序號去S", "要保序號"], True),
     ("excess",    "差異4·EPB多打/無序號", ["DOC_ID", "品類", "SAcare品項", "要保序號"], True),
-    ("deposit",   "差異5·訂金", ["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "保險已登記", "要保序號"], True),
+    ("deposit",   "訂金·已納入下訂月比對", ["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "保險已登記", "要保序號"], False),
     ("check_tbl", "檢測新機·數量核對", ["品類", "保險筆數", "EPB筆數", "相符"], False),
     ("epb_check_detail", "檢測新機·EPB明細", ["DOC_ID", "品類", "SAcare品項", "EPB序號去S"], False),
     ("matched",   "✅相符明細", ["保單號", "保險起日", "產品種類", "序號"], False),
@@ -55,7 +55,6 @@ def reconcile():
         month = request.form.get("month", "").strip() or SR.detect_month(path)
 
         ins, R = SR.run(path, month, shop)
-        dep_reg = int((R["deposit"]["保險已登記"] == "是").sum()) if len(R["deposit"]) else 0
         summary = {
             "月份": month, "門市": shop,
             "保險已繳": len(ins), "新機": int((~ins["檢測新機"]).sum()), "檢測新機": int(ins["檢測新機"].sum()),
@@ -66,7 +65,6 @@ def reconcile():
                 "保險有EPB無": len(R["only_ins"]),
                 "EPB有保險無": len(R["only_epb"]),
                 "EPB多打無序號": len(R["excess"]),
-                "訂金(已登記)": f"{len(R['deposit'])} ({dep_reg})",
             },
         }
         tabs = [{"key": k, "title": t, "cols": [c for c in cols], "anomaly": an,

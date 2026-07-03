@@ -8,10 +8,10 @@
 規則重點:
   - 保險端: .xls(實為HTML)。只取「繳費=已繳(Y)」且「保險起日」(=生效/登記日)落在指定月份。
   - 機器序號取「型號 序號 [Apple Pencil序號] [鍵盤序號]」的第一個序號(=主機/iPad)，配件序號忽略。
-  - 機況=檢測新機: 序號在 EPB 不一定對得上, 屬正常, 不列為異常(另開分頁按數量核對)。
+  - 新機／檢測新機不影響配對；序號相同即視為相符。無法取得序號時才另頁按品類數量核對。
   - EPB端: 抓該月含 S.A CARE 品項的單據, 同單主機序號配對(去開頭S)。
     主機品類限 iPhone/iPad/Mac/Watch/AirPods, 排除 Apple Pencil(4010)等配件序號。
-  - 訂金(TRANS_TYPE=G): 該月不算實際銷售, 若保險已登記則列為異常。
+  - 訂金(TRANS_TYPE=G): 依下訂月份比對保險；可追溯到既有訂金序號的尾款(H)不重複計算。
 """
 from __future__ import annotations
 import argparse, os, re, subprocess, sys, io
@@ -91,7 +91,7 @@ def query_epb(month: str, shop: str) -> pd.DataFrame:
     start, end = f"{y}-{m:02d}-01", f"{y + (m // 12)}-{(m % 12) + 1:02d}-01"
     sql = f"""
 SELECT p.DOC_ID, TO_CHAR(p.DOC_DATE,'YYYY-MM-DD') DOC_DATE, p.LINE_NO, p.TRANS_TYPE,
-       p.STK_ID, p.NAME, p.SRN_ID, p.STK_QTY, p.CAT4_ID
+       p.EMP_ID1, p.STK_ID, p.NAME, p.SRN_ID, p.STK_QTY, p.CAT4_ID
 FROM POSLINEV_BI p
 WHERE p.SHOP_ID='{shop}'
   AND p.DOC_DATE >= TO_DATE('{start}','YYYY-MM-DD') AND p.DOC_DATE < TO_DATE('{end}','YYYY-MM-DD')
@@ -108,23 +108,23 @@ ORDER BY p.DOC_ID, p.LINE_NO
     return pd.read_csv(io.StringIO(proc.stdout), dtype=str).fillna("")
 
 
-def query_tailpaid_keys(month: str, shop: str) -> set:
-    """當月尾款(TRANS_TYPE=H)單據上交付的裝置序號(去S)。訂金若已尾款=已完成。"""
+def query_prior_deposit_keys(month: str, shop: str) -> set:
+    """查詢月份開始前一年內的訂金主機序號，用來辨識跨月尾款重複。"""
     _ensure_epb_query()
-    y, m = int(month[:4]), int(month[5:7])
-    start, end = f"{y}-{m:02d}-01", f"{y + (m // 12)}-{(m % 12) + 1:02d}-01"
+    start = f"{month}-01"
     sql = f"""
 SELECT DISTINCT REPLACE(p.SRN_ID,' ','') SRN
 FROM POSLINEV_BI p
-WHERE p.SHOP_ID='{shop}' AND p.TRANS_TYPE='H' AND p.SRN_ID IS NOT NULL
-  AND p.DOC_DATE >= TO_DATE('{start}','YYYY-MM-DD') AND p.DOC_DATE < TO_DATE('{end}','YYYY-MM-DD')
+WHERE p.SHOP_ID='{shop}' AND p.TRANS_TYPE='G' AND p.SRN_ID IS NOT NULL
+  AND p.DOC_DATE >= ADD_MONTHS(TO_DATE('{start}','YYYY-MM-DD'),-12)
+  AND p.DOC_DATE < TO_DATE('{start}','YYYY-MM-DD')
 """
     proc = subprocess.run([sys.executable, EPB_QUERY, "--format", "tsv", "--limit", "20000", sql],
                           text=True, capture_output=True, timeout=180)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr or proc.stdout)
-    lines = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
-    return {strip_s(l) for l in lines[1:]} if len(lines) > 1 else set()
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return {strip_s(line) for line in lines[1:]} if len(lines) > 1 else set()
 
 
 def sac_category(name: str) -> str:
@@ -135,6 +135,51 @@ def sac_category(name: str) -> str:
     if "IPAD" in n: return "iPad"
     if "MACBOOK" in n or "IMAC" in n or " MAC" in n: return "Mac"
     return "其他"
+
+
+def _same_month_deposit_tail_pairs(e: pd.DataFrame) -> dict:
+    """以同月、同員工、相同品項數量識別 G 訂金與 H 尾款，回傳 G單→H單。"""
+    if "EMP_ID1" not in e.columns:
+        e = e.assign(EMP_ID1="")
+
+    def signature(group):
+        return tuple(sorted(
+            (str(row.STK_ID), round(float(row.STK_QTY), 4))
+            for row in group.itertuples()
+        ))
+
+    meta = {}
+    for doc, group in e.groupby("DOC_ID"):
+        trans = set(group["TRANS_TYPE"])
+        kind = "G" if "G" in trans else ("H" if "H" in trans else "")
+        if not kind:
+            continue
+        meta[doc] = {
+            "kind": kind,
+            "date": str(group["DOC_DATE"].iloc[0]),
+            "employee": str(group["EMP_ID1"].iloc[0]),
+            "signature": signature(group),
+        }
+
+    pairs, used_g = {}, set()
+    for h_doc, h in sorted(meta.items(), key=lambda item: item[1]["date"]):
+        if h["kind"] != "H":
+            continue
+        candidates = [
+            (g["date"], g_doc)
+            for g_doc, g in meta.items()
+            if g["kind"] == "G"
+            and g_doc not in used_g
+            and g["date"][:7] == h["date"][:7]
+            and g["date"] <= h["date"]
+            and g["employee"] == h["employee"]
+            and g["signature"] == h["signature"]
+        ]
+        if candidates:
+            _, g_doc = max(candidates)
+            pairs[g_doc] = h_doc
+            used_g.add(g_doc)
+    return pairs
 
 
 def build_epb_units(e: pd.DataFrame, ins_keys: set = frozenset()):
@@ -153,23 +198,33 @@ def build_epb_units(e: pd.DataFrame, ins_keys: set = frozenset()):
     dev = e[(e["SRN_ID"] != "") & (e["CAT4_ID"].isin(MAIN_CAT4))].copy()   # 只留主機序號
     dev["mcat"] = dev["CAT4_ID"].map(MAIN_CAT4)
     dev["key"] = dev["SRN_ID"].map(strip_s)
+    deposit_tail_pairs = _same_month_deposit_tail_pairs(e)
+    paired_tail_docs = set(deposit_tail_pairs.values())
 
     serial_rows, noser_rows = [], []
     for doc in sac["DOC_ID"].unique():
+        if doc in paired_tail_docs:
+            continue
         sg, dg = sac[sac["DOC_ID"] == doc], dev[dev["DOC_ID"] == doc]
+        linked_tail_doc = deposit_tail_pairs.get(doc, "")
+        if linked_tail_doc:
+            dg = pd.concat([dg, dev[dev["DOC_ID"] == linked_tail_doc]], ignore_index=True)
         ddate = sg["DOC_DATE"].iloc[0]
         for cat, g in sg.groupby("cat"):
             net = int(round(g["STK_QTY"].sum()))
             if net == 0:
                 continue
             sign = 1 if net > 0 else -1
-            ttype = "G" if (g["TRANS_TYPE"] == "G").any() else ("A" if net > 0 else "E")
+            ttype = ("G" if (g["TRANS_TYPE"] == "G").any()
+                     else "H" if (g["TRANS_TYPE"] == "H").any()
+                     else ("A" if net > 0 else "E"))
             is_check = bool(g["NAME"].str.contains("檢測新機").any()) or doc in check_docs
             cand = dg[dg["mcat"] == cat]["key"].tolist()
             cand.sort(key=lambda k: k not in ins_keys)   # 保險已登記序號優先配對
             for i in range(abs(net)):
                 rec = {"DOC_ID": doc, "日期": ddate, "SAcare品項": g["NAME"].iloc[0], "品類": cat,
-                       "交易別": ttype, "檢測新機": is_check, "sign": sign}
+                       "交易別": ttype, "關聯尾款單據": linked_tail_doc,
+                       "檢測新機": is_check, "sign": sign}
                 key = cand[i] if i < len(cand) else ""
                 if key:
                     serial_rows.append({**rec, "EPB序號去S": key})
@@ -180,7 +235,7 @@ def build_epb_units(e: pd.DataFrame, ins_keys: set = frozenset()):
 
 # ---------- 比對 ----------
 def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame,
-              tail_paid_keys: set = frozenset(), fuzzy_thr=0.7):
+              prior_deposit_keys: set = frozenset(), fuzzy_thr=0.7):
     ins_all_keys = ins.attrs["all_keys"]
     ref_by_key = ins.attrs.get("ref_by_key", {})        # 序號 → 要保序號
     ins_new = ins[~ins["檢測新機"]].copy()
@@ -206,27 +261,28 @@ def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame
         eff_keys = set(net[net > 0].index)            # 淨額>0 = 實際有 SAcare 的序號
         pos = serial_df[serial_df["sign"] > 0]
         info = pos.sort_values("檢測新機").groupby("EPB序號去S").agg(
-            DOC_ID=("DOC_ID", "last"), 品類=("品類", "last"), SAcare品項=("SAcare品項", "last"),
+            DOC_ID=("DOC_ID", "last"), 日期=("日期", "last"),
+            品類=("品類", "last"), SAcare品項=("SAcare品項", "last"),
+            關聯尾款單據=("關聯尾款單據", "last"),
             是否訂金=("交易別", lambda s: (s == "G").any()),
+            是否尾款=("交易別", lambda s: (s == "H").any()),
             檢測新機=("檢測新機", "any")).reset_index()
         info = info[info["EPB序號去S"].isin(eff_keys)].copy()
     else:
-        info = pd.DataFrame(columns=["EPB序號去S", "DOC_ID", "品類", "SAcare品項", "是否訂金", "檢測新機"])
+        info = pd.DataFrame(columns=["EPB序號去S", "DOC_ID", "日期", "品類", "SAcare品項", "關聯尾款單據",
+                                     "是否訂金", "是否尾款", "檢測新機"])
         eff_keys = set()
 
-    # 訂金規則: 訂金不算台數; 但若該裝置當月已被尾款(H) → 視為已完成, 比照正常銷售
-    info["訂金已尾款"] = info["是否訂金"] & info["EPB序號去S"].isin(tail_paid_keys)
-    info["有效訂金"] = info["是否訂金"] & (~info["訂金已尾款"])   # 仍是純訂金(未尾款)
-
-    normal_eff = info[(~info["有效訂金"]) & (~info["檢測新機"])]   # 含: 一般A + 訂金已尾款
-    deposit_eff = info[info["有效訂金"]].copy()                    # 純訂金(未尾款) → 差異5
-    check_eff = info[info["檢測新機"] & (~info["有效訂金"])]
+    # 新機／檢測新機只是銷售方案差異，不影響序號配對。
+    # 訂金在下訂月份參與比對；只有能追到前月訂金序號的 H 才視為跨月重複。
+    duplicate_tail = info["是否尾款"] & (~info["是否訂金"]) & info["EPB序號去S"].isin(prior_deposit_keys)
+    normal_eff = info[~duplicate_tail].copy()
+    deposit_eff = info[info["是否訂金"]].copy()
     ek_normal = set(normal_eff["EPB序號去S"])
-    dep_reg_keys = set(deposit_eff["EPB序號去S"]) & ins_all_keys
 
-    matched = ins_new[ins_new["key"].isin(ek_normal)].copy()
+    matched = ins[ins["key"].isin(ek_normal)].copy()
     # 差異2 = 保險(新機)有, 但 EPB 無有效 SAcare (含: 從未結 / 已退淨額0)
-    only_ins = ins_new[(~ins_new["key"].isin(ek_normal)) & (~ins_new["key"].isin(dep_reg_keys))].copy()
+    only_ins = ins_new[~ins_new["key"].isin(ek_normal)].copy()
     only_ins["EPB單據(參考)"] = only_ins["key"].map(lambda k: docs_by_key.get(k, ""))
     only_epb = normal_eff[~normal_eff["EPB序號去S"].isin(ins_all_keys)].copy()
     only_epb["要保序號"] = only_epb["EPB序號去S"].map(lambda k: ref_by_key.get(k, ""))
@@ -254,15 +310,19 @@ def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame
     deposit_eff["保險已登記"] = deposit_eff["EPB序號去S"].apply(lambda k: "是" if k in ins_all_keys else "否")
     deposit_eff["要保序號"] = deposit_eff["EPB序號去S"].map(lambda k: ref_by_key.get(k, ""))
 
-    # EPB 多打/無主機序號 (正向且非檢測非訂金); 由同單主機序號回查要保序號
-    excess = noser_df[(~noser_df.get("檢測新機", False)) & (noser_df.get("交易別", "") != "G")].copy() \
+    # EPB 多打/無主機序號 (正向且非檢測); 由同單主機序號回查要保序號
+    excess = noser_df[~noser_df.get("檢測新機", False)].copy() \
         if len(noser_df) else pd.DataFrame(columns=["DOC_ID", "品類", "SAcare品項"])
     if len(excess):
         excess["要保序號"] = excess["DOC_ID"].map(ref_of_doc)
 
-    # 檢測新機(正常) 數量核對 (品類對齊)
-    ic = ins_check["產品種類"].map(sac_category).value_counts().rename("保險筆數")
-    epb_check_units = pd.concat([check_eff[["品類"]],
+    # 無法用序號配對的檢測新機，才退回品類數量核對。
+    ins_check_unmatched = ins_check[~ins_check["key"].isin(ek_normal)].copy()
+    check_eff_unmatched = normal_eff[
+        normal_eff["檢測新機"] & (~normal_eff["EPB序號去S"].isin(ins_all_keys))
+    ]
+    ic = ins_check_unmatched["產品種類"].map(sac_category).value_counts().rename("保險筆數")
+    epb_check_units = pd.concat([check_eff_unmatched[["品類"]],
                                  noser_df[noser_df.get("檢測新機", False)][["品類"]] if len(noser_df) else pd.DataFrame(columns=["品類"])])
     ec = epb_check_units["品類"].value_counts().rename("EPB筆數")
     check_tbl = pd.concat([ic, ec], axis=1).fillna(0).astype(int)
@@ -270,15 +330,16 @@ def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame
     check_tbl = check_tbl.reset_index(names="品類")
 
     epb_check_detail = pd.concat([
-        check_eff[["DOC_ID", "品類", "SAcare品項", "EPB序號去S"]],
+        check_eff_unmatched[["DOC_ID", "品類", "SAcare品項", "EPB序號去S"]],
         (noser_df[noser_df.get("檢測新機", False)].assign(**{"EPB序號去S": "(無序號)"})[
             ["DOC_ID", "品類", "SAcare品項", "EPB序號去S"]] if len(noser_df) else pd.DataFrame())
     ], ignore_index=True)
 
-    # 合併所有 SAcare 單位(含正負號/日期), 供品類與逐日彙總
+    # 有序號單位依裝置淨額後一台計一次，避免同月 G/H 重複；無序號單位維持原始淨額。
     cols = ["日期", "品類", "sign"]
-    all_units = pd.concat([df[cols] for df in (serial_df, noser_df) if len(df)], ignore_index=True) \
-        if (len(serial_df) or len(noser_df)) else pd.DataFrame(columns=cols)
+    effective_serial_units = normal_eff[["日期", "品類"]].assign(sign=1)
+    all_units = pd.concat([df[cols] for df in (effective_serial_units, noser_df) if len(df)], ignore_index=True) \
+        if (len(effective_serial_units) or len(noser_df)) else pd.DataFrame(columns=cols)
 
     # ① 品類數量比較 (保險 vs EPB淨額) — 粗估哪個品項有差
     ic = ins["產品種類"].map(sac_category).value_counts().rename("保險筆數")
@@ -295,18 +356,18 @@ def reconcile(ins: pd.DataFrame, serial_df: pd.DataFrame, noser_df: pd.DataFrame
     daily_tbl = daily_tbl.reset_index(names="日期").sort_values("日期")
 
     return dict(matched=matched, typo=typo, only_ins=only_ins, only_epb=only_epb,
-                excess=excess, deposit=deposit_eff, ins_check=ins_check,
+                excess=excess, deposit=deposit_eff, ins_check=ins_check_unmatched,
                 epb_check_detail=epb_check_detail, check_tbl=check_tbl,
                 cat_tbl=cat_tbl, daily_tbl=daily_tbl,
-                n_epb_units=len(serial_df[serial_df["sign"] > 0]) + len(noser_df) if len(serial_df) else len(noser_df))
+                n_epb_units=len(normal_eff) + len(noser_df))
 
 
 def run(insurance_path: str, month: str, shop: str = "004") -> dict:
     """供 server / 程式呼叫: 回傳 (ins, reconcile結果dict)。"""
     ins = load_insurance(insurance_path, month)
     serial_df, noser_df = build_epb_units(query_epb(month, shop), ins.attrs["all_keys"])
-    tail_paid = query_tailpaid_keys(month, shop)
-    return ins, reconcile(ins, serial_df, noser_df, tail_paid)
+    prior_deposits = query_prior_deposit_keys(month, shop)
+    return ins, reconcile(ins, serial_df, noser_df, prior_deposits)
 
 
 def detect_month(insurance_path: str) -> str:
@@ -326,15 +387,15 @@ def main() -> int:
 
     ins = load_insurance(args.insurance, args.month)
     serial_df, noser_df = build_epb_units(query_epb(args.month, args.shop), ins.attrs["all_keys"])
-    tail_paid = query_tailpaid_keys(args.month, args.shop)
-    R = reconcile(ins, serial_df, noser_df, tail_paid)
+    prior_deposits = query_prior_deposit_keys(args.month, args.shop)
+    R = reconcile(ins, serial_df, noser_df, prior_deposits)
 
     summary = pd.DataFrame({"項目": [
         "比對月份", "門市", "保險已繳筆數", "其中-新機", "其中-檢測新機",
         "EPB SAcare單位(正向)",
-        "✅ 完全相符(新機)", "⚠️ 序號登記差異(同機)", "❌ 保險有/EPB無有效SAcare(新機)",
-        "❌ EPB有/保險未登記(新機)", "⚠️ EPB一台多打/無主機序號",
-        "⚠️ 訂金(其中保險已登記)", "ℹ️ 檢測新機(正常,另頁核對)"],
+        "✅ 完全相符(序號)", "⚠️ 序號登記差異(同機)", "❌ 保險有/EPB無有效SAcare",
+        "❌ EPB有/保險未登記", "⚠️ EPB一台多打/無主機序號",
+        "ℹ️ 訂金(已納入下訂月比對)", "ℹ️ 無序號檢測新機(另頁核對)"],
         "數值": [args.month, args.shop, len(ins), int((~ins["檢測新機"]).sum()), int(ins["檢測新機"].sum()),
                  R["n_epb_units"], len(R["matched"]), len(R["typo"]), len(R["only_ins"]),
                  len(R["only_epb"]), len(R["excess"]),
@@ -348,9 +409,9 @@ def main() -> int:
         R["matched"][["保單號", "保險起日", "產品種類", "序號"]].to_excel(w, sheet_name="相符", index=False)
         _safe(R["typo"]).to_excel(w, sheet_name="差異1_序號登記差異", index=False)
         R["only_ins"][["要保序號", "保單號", "保險起日", "產品種類", "序號", "EPB單據(參考)"]].to_excel(w, sheet_name="差異2_保險有EPB無", index=False)
-        R["only_epb"][["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "要保序號"]].to_excel(w, sheet_name="差異3_EPB有保險無", index=False)
+        R["only_epb"][["DOC_ID", "關聯尾款單據", "品類", "SAcare品項", "EPB序號去S", "要保序號"]].to_excel(w, sheet_name="差異3_EPB有保險無", index=False)
         _safe(R["excess"][["DOC_ID", "品類", "SAcare品項", "要保序號"]] if len(R["excess"]) else R["excess"]).to_excel(w, sheet_name="差異4_EPB多打無序號", index=False)
-        _safe(R["deposit"][["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "保險已登記", "要保序號"]] if len(R["deposit"]) else R["deposit"]).to_excel(w, sheet_name="差異5_訂金", index=False)
+        _safe(R["deposit"][["DOC_ID", "品類", "SAcare品項", "EPB序號去S", "保險已登記", "要保序號"]] if len(R["deposit"]) else R["deposit"]).to_excel(w, sheet_name="訂金_已納入比對", index=False)
         R["check_tbl"].to_excel(w, sheet_name="檢測新機_數量核對", index=False)
         R["ins_check"][["保單號", "保險起日", "產品種類", "序號"]].to_excel(w, sheet_name="檢測新機_保險明細", index=False)
         _safe(R["epb_check_detail"]).to_excel(w, sheet_name="檢測新機_EPB明細", index=False)
